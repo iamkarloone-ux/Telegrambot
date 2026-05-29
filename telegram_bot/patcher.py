@@ -13,6 +13,12 @@ from telegram_bot.config import BASE_AUTH, BASE_SYNC, CAR_LIST_URL, CAR_IMAGES_U
 from telegram_bot.keyboards import get_patch_menu_keyboard
 from telegram_bot.states import ResellerStates
 
+# --- SYSTEM UTILITIES ---
+
+async def verify_license_key(key: str, user_id: str) -> dict:
+    """Delegates key verification and binding to the core database module."""
+    return await db.verify_license_key(key, user_id)
+
 def find_compressed_data(d):
     if isinstance(d, dict):
         if "compressed_data" in d: return d
