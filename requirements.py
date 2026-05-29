@@ -1,0 +1,8 @@
+fastapi==0.110.0
+uvicorn==0.29.0
+asyncpg==0.29.0
+httpx[http2]==0.27.0
+Pillow==10.3.0
+python-dotenv==1.0.1
+orjson==3.9.15
+aiogram==3.10.0
