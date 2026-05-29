@@ -29,8 +29,8 @@ async def cmd_start(message: Message, state: FSMContext):
     """Greets user and asks for reseller license key."""
     await state.clear()
     await message.answer(
-        "🔑 *Carx Street Patcher Tool* 🔑\n\n"
-        "To access this tool, please enter your active License Key.\n\n"
+        "🔑 *Reseller Patcher Tool* 🔑\n\n"
+        "To access this tool, please enter your active Reseller License Key.\n\n"
         "Don't have a key? Message the developer to purchase access:\n"
         "💬 m.me/lark.abalunan.1\n\n"
         "👉 Type /start at any time to cancel.",
@@ -47,7 +47,7 @@ async def process_key(message: Message, state: FSMContext):
     if not license_info:
         await message.answer(
             "❌ *Invalid or Expired License Key.*\n\n"
-            "To buy a subscription, contact:\n"
+            "To buy a subscription (600 PHP/Month), contact:\n"
             "💬 m.me/lark.abalunan.1",
             parse_mode="Markdown"
         )
@@ -119,8 +119,9 @@ async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext)
     for car_id in page_cars:
         car_data = car_db[car_id]
         mapping = car_maps.get(car_id, {})
-        # Falls back cleanly to internal __desc_id string if missing in car_images.json
-        name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
+        db_name = car_data.get("__desc_id", f"Car {car_id}")
+        # Mismatch detector enabled
+        name = f"{mapping.get('name', db_name)} ({db_name})"
         
         out += f"• *{name}* (Price: Reseller Free)\n"
         keyboard_buttons.append([InlineKeyboardButton(text=f"⚡ Inject {name}", callback_data=f"inject_car_id_{car_id}")])
@@ -159,7 +160,9 @@ async def process_inline_car_injection(callback: CallbackQuery, state: FSMContex
     car_db, car_maps = await load_db_data_async()
     car_data = car_db[car_id]
     mapping = car_maps.get(car_id, {})
-    name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
+    db_name = car_data.get("__desc_id", f"Car {car_id}")
+    # Mismatch detector enabled
+    name = f"{mapping.get('name', db_name)} ({db_name})"
     img_url = mapping.get("image_url")
     
     info = (
@@ -275,8 +278,6 @@ async def process_xp(event, state: FSMContext):
         )
     )
 
-# --- NITRO MANAGEMENT SUB-MENU & OPTIONS ---
-
 @dp.message(ResellerStates.awaiting_single_nitro_car_id)
 @dp.callback_query(F.data.startswith("nitro_"), ResellerStates.awaiting_patch_choice)
 async def process_nitro_options(event, state: FSMContext):
@@ -322,7 +323,6 @@ async def process_nitro_options(event, state: FSMContext):
             await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(), parse_mode="Markdown")
             await state.set_state(ResellerStates.awaiting_patch_choice)
     else:
-        # Received single Car ID text
         car_id = choice
         await msg_obj.answer(f"⏳ Patcher running... Applying Max Nitro to Car ID {car_id}.")
         asyncio.create_task(execute_reseller_patch_task(msg_obj, state, 'nitro_single', target_car_id=car_id))
@@ -422,4 +422,4 @@ async def process_patch_selection(event, state: FSMContext):
         execute_reseller_patch_task(
             msg_obj, state, action
         )
-    )
+                                    )
