@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from telegram_bot.config import CARS_PER_PAGE
+from telegram_bot.config import CARS_PER_PAGE, TELEGRAM_BOT_TOKEN
 from telegram_bot.states import ResellerStates
 from telegram_bot.keyboards import get_patch_menu_keyboard, get_skip_keyboard
 from telegram_bot.patcher import (
@@ -20,6 +20,8 @@ from telegram_bot.patcher import (
     execute_reseller_patch_task
 )
 
+# Initialize Bot and Dispatcher locally inside handlers to allow clean imports in main.py
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
@@ -39,6 +41,7 @@ async def cmd_start(message: Message, state: FSMContext):
 @dp.message(ResellerStates.awaiting_key)
 async def process_key(message: Message, state: FSMContext):
     key = message.text.strip()
+    # Pass Telegram user ID to verify and handle license key binding
     license_info = await verify_license_key(key, str(message.from_user.id))
     
     if not license_info:
@@ -277,7 +280,7 @@ async def process_xp(event, state: FSMContext):
 @dp.message(ResellerStates.awaiting_single_nitro_car_id)
 @dp.callback_query(F.data.startswith("nitro_"), ResellerStates.awaiting_patch_choice)
 async def process_nitro_options(event, state: FSMContext):
-    choice = event.text.strip() if isinstance(event, Message) else event.data
+    choice = event.text.strip().lower() if isinstance(event, Message) else event.data
     msg_obj = event if isinstance(event, Message) else event.message
     
     if not isinstance(event, Message):
