@@ -422,4 +422,4 @@ async def process_patch_selection(event, state: FSMContext):
         execute_reseller_patch_task(
             msg_obj, state, action
         )
-                                    )
+    )
