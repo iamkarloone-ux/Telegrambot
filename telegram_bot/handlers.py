@@ -29,7 +29,7 @@ async def cmd_start(message: Message, state: FSMContext):
     """Greets user and asks for reseller license key."""
     await state.clear()
     await message.answer(
-        "🔑 *Reseller Patcher Tool* 🔑\n\n"
+        "🔑 *Carx Street Patcher Tool* 🔑\n\n"
         "To access this tool, please enter your active License Key.\n\n"
         "Don't have a key? Message the developer to purchase access:\n"
         "💬 m.me/lark.abalunan.1\n\n"
