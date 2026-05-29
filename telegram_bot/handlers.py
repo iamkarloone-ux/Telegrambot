@@ -30,7 +30,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "🔑 *Reseller Patcher Tool* 🔑\n\n"
-        "To access this tool, please enter your active Reseller License Key.\n\n"
+        "To access this tool, please enter your active License Key.\n\n"
         "Don't have a key? Message the developer to purchase access:\n"
         "💬 m.me/lark.abalunan.1\n\n"
         "👉 Type /start at any time to cancel.",
@@ -47,7 +47,7 @@ async def process_key(message: Message, state: FSMContext):
     if not license_info:
         await message.answer(
             "❌ *Invalid or Expired License Key.*\n\n"
-            "To buy a subscription (600 PHP/Month), contact:\n"
+            "To buy a subscription, contact:\n"
             "💬 m.me/lark.abalunan.1",
             parse_mode="Markdown"
         )
