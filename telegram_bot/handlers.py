@@ -119,9 +119,8 @@ async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext)
     for car_id in page_cars:
         car_data = car_db[car_id]
         mapping = car_maps.get(car_id, {})
-        db_name = car_data.get("__desc_id", f"Car {car_id}")
-        # Mismatch detector enabled
-        name = f"{mapping.get('name', db_name)} ({db_name})"
+        # Falls back cleanly to internal __desc_id string if missing in car_images.json
+        name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
         
         out += f"• *{name}* (Price: Reseller Free)\n"
         keyboard_buttons.append([InlineKeyboardButton(text=f"⚡ Inject {name}", callback_data=f"inject_car_id_{car_id}")])
@@ -160,9 +159,7 @@ async def process_inline_car_injection(callback: CallbackQuery, state: FSMContex
     car_db, car_maps = await load_db_data_async()
     car_data = car_db[car_id]
     mapping = car_maps.get(car_id, {})
-    db_name = car_data.get("__desc_id", f"Car {car_id}")
-    # Mismatch detector enabled
-    name = f"{mapping.get('name', db_name)} ({db_name})"
+    name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
     img_url = mapping.get("image_url")
     
     info = (
@@ -278,6 +275,8 @@ async def process_xp(event, state: FSMContext):
         )
     )
 
+# --- NITRO MANAGEMENT SUB-MENU & OPTIONS ---
+
 @dp.message(ResellerStates.awaiting_single_nitro_car_id)
 @dp.callback_query(F.data.startswith("nitro_"), ResellerStates.awaiting_patch_choice)
 async def process_nitro_options(event, state: FSMContext):
@@ -323,6 +322,7 @@ async def process_nitro_options(event, state: FSMContext):
             await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(), parse_mode="Markdown")
             await state.set_state(ResellerStates.awaiting_patch_choice)
     else:
+        # Received single Car ID text
         car_id = choice
         await msg_obj.answer(f"⏳ Patcher running... Applying Max Nitro to Car ID {car_id}.")
         asyncio.create_task(execute_reseller_patch_task(msg_obj, state, 'nitro_single', target_car_id=car_id))
