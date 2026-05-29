@@ -32,7 +32,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "🔑 *Reseller Patcher Tool* 🔑\n\n"
         "To access this tool, please enter your active Reseller License Key.\n\n"
         "Don't have a key? Message the developer to purchase access:\n"
-        "💬 m.me/lark.abalunan.1\n\n"
+        "💬 t.me/ImZhouFann\n\n"
         "👉 Type /start at any time to cancel.",
         parse_mode="Markdown"
     )
