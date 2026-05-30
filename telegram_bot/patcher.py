@@ -118,6 +118,7 @@ async def execute_reseller_patch_task(
         data = await state.get_data()
         email = data['target_email']
         password = data['target_pass']
+        tier = data.get("license_tier", "premium") # Retrieves active key tier
         dev_id = uuid.uuid4().hex
         
         async with httpx.AsyncClient(http2=True, timeout=60.0) as client:
@@ -206,7 +207,6 @@ async def execute_reseller_patch_task(
                 garage[str(last_id)] = car_db[target_car_id]
                 
                 car_name = car_db[target_car_id].get("__desc_id", f"Car {target_car_id}")
-                # Clean, customer-facing delivery text (removed raw database IDs entirely)
                 summary_actions.append(f"🚗 Injected untouched {car_name} into your garage")
 
             # Encryption and Upload
@@ -226,10 +226,10 @@ async def execute_reseller_patch_task(
             )
             await event_message.answer(success_msg, parse_mode="Markdown")
             
-            # Loopback: Send action menu again automatically
+            # Loopback: Send action menu again automatically with correct tier lock views
             await event_message.answer(
                 "⚙️ *Select Patch Action* ⚙️",
-                reply_markup=get_patch_menu_keyboard(),
+                reply_markup=get_patch_menu_keyboard(tier=tier),
                 parse_mode="Markdown"
             )
             await state.set_state(ResellerStates.awaiting_patch_choice)
@@ -238,7 +238,7 @@ async def execute_reseller_patch_task(
         await event_message.answer(f"😔 *Patcher Task Failed.*\n\nError details: {e}", parse_mode="Markdown")
         await event_message.answer(
             "⚙️ *Select Patch Action* ⚙️",
-            reply_markup=get_patch_menu_keyboard(),
+            reply_markup=get_patch_menu_keyboard(tier=tier),
             parse_mode="Markdown"
         )
         await state.set_state(ResellerStates.awaiting_patch_choice)
