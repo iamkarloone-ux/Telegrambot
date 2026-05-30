@@ -1,456 +1,452 @@
-# telegram_bot/handlers.py
-import asyncio
-import uuid
-import httpx
-import math
-import database as db  # Imports your existing root database.py
-from aiogram import Dispatcher, Bot, F
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+# database.py
+import asyncpg
+from config import DATABASE_URL
+import sys
 
-from telegram_bot.config import CARS_PER_PAGE, TELEGRAM_BOT_TOKEN
-from telegram_bot.states import ResellerStates
-from telegram_bot.keyboards import get_patch_menu_keyboard, get_skip_keyboard
-from telegram_bot.patcher import (
-    verify_license_key,
-    load_db_data_async,
-    get_profile_injector,
-    decrypt_payload,
-    execute_reseller_patch_task
-)
+pool = None
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    """Greets user and asks for reseller license key."""
-    await state.clear()
-    await message.answer(
-        "🔑 *Reseller Patcher Tool* 🔑\n\n"
-        "To access this tool, please enter your active Reseller License Key.\n\n"
-        "Don't have a key? Message the developer to purchase access:\n"
-        "💬 t.me/ImZhouFann\n\n"
-        "👉 Type /start at any time to cancel.",
-        parse_mode="Markdown"
-    )
-    await state.set_state(ResellerStates.awaiting_key)
-
-@dp.message(ResellerStates.awaiting_key)
-async def process_key(message: Message, state: FSMContext):
-    key = message.text.strip()
-    license_info = await verify_license_key(key, str(message.from_user.id))
-    
-    if not license_info:
-        await message.answer(
-            "❌ *Invalid or Expired License Key.*\n\n"
-            "To buy a subscription (600 PHP/Month), contact:\n"
-            "💬 m.me/lark.abalunan.1",
-            parse_mode="Markdown"
-        )
-        return
+async def init_db():
+    global pool
+    if not DATABASE_URL:
+        print("FATAL ERROR: DATABASE_URL is not found in config.py!")
+        sys.exit(1)
         
-    if license_info.get("bound") is False:
-        await message.answer(
-            "❌ *License Binding Blocked.*\n\n"
-            "This key is already locked/bound to another Telegram user. Keys are restricted to 1 account only.",
-            parse_mode="Markdown"
-        )
-        return
-
-    tier_level = license_info.get("tier", "premium")
-    tier_display = "⭐ PREMIUM" if tier_level == "premium" else "🆕 FREE"
-    
-    await state.update_data(license_key=key, license_tier=tier_level)
-    await message.answer(f"✅ License verified successfully! ({tier_display})\n\n📧 Enter target CarX Street account Email:")
-    await state.set_state(ResellerStates.awaiting_email)
-
-@dp.message(ResellerStates.awaiting_email)
-async def process_email(message: Message, state: FSMContext):
-    email = message.text.strip()
-    if "@" not in email or "." not in email:
-        await message.answer("❌ Invalid email format. Try again:")
-        return
-        
-    await state.update_data(target_email=email)
-    await message.answer("🔐 Enter target account Password:")
-    await state.set_state(ResellerStates.awaiting_password)
-
-@dp.message(ResellerStates.awaiting_password)
-async def process_password(message: Message, state: FSMContext):
-    password = message.text.strip()
-    await state.update_data(target_pass=password)
-    
-    data = await state.get_data()
-    tier = data.get("license_tier", "premium")
-    
-    await message.answer(
-        "⚙️ *Select Patch Action* ⚙️\n\n"
-        "Select an option below, or manually type your selection number.",
-        reply_markup=get_patch_menu_keyboard(tier=tier),
-        parse_mode="Markdown"
-    )
-    await state.set_state(ResellerStates.awaiting_patch_choice)
-
-
-# --- 🛑 SPECIFIC SUB-HANDLERS (DEFINED FIRST FOR ROUTING PRIORITY) 🛑 ---
-
-# --- PREMIUM LOCKED POPUP TRIGGER ---
-
-@dp.callback_query(F.data == "premium_locked", ResellerStates.awaiting_patch_choice)
-async def process_premium_locked(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("🔒 Feature Locked!", show_alert=True)
-    await callback.message.answer(
-        "❌ *Premium Feature Locked.*\n\n"
-        "Your current key is registered on our *Free tier* (only Ban-Safe Pack 2 is active).\n"
-        "To purchase Premium access, contact the developer:\n"
-        "💬 t.me/ImZhouFann",
-        parse_mode="Markdown"
-    )
-
-# --- PAGINATED INJECT CATALOG ROUTING ---
-
-async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext):
-    await state.update_data(last_catalog_page=page)
-    
-    car_db, car_maps = await load_db_data_async()
-    if not car_db:
-        await msg_obj.answer("❌ Failed to download vehicle database. Try again later.")
-        return
-
-    car_ids = list(car_db.keys())
-    total_pages = math.ceil(len(car_ids) / CARS_PER_PAGE)
-    page = max(1, min(page, total_pages))
-
-    start_idx = (page - 1) * CARS_PER_PAGE
-    end_idx = start_idx + CARS_PER_PAGE
-    page_cars = car_ids[start_idx:end_idx]
-
-    out = f"🏎️ *Vehicle Inventory Catalog* (Page {page}/{total_pages})\n"
-    out += "Tidy inline injections with zero exposed Car IDs:\n\n"
-    
-    keyboard_buttons = []
-    
-    for car_id in page_cars:
-        car_data = car_db[car_id]
-        mapping = car_maps.get(car_id, {})
-        name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
-        
-        out += f"• *{name}* (Price: Reseller Free)\n"
-        keyboard_buttons.append([InlineKeyboardButton(text=f"⚡ Inject {name}", callback_data=f"inject_car_id_{car_id}")])
-
-    # Add Navigation row
-    nav_row = []
-    if page > 1:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"catalog_page_{page - 1}"))
-    if page < total_pages:
-        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"catalog_page_{page + 1}"))
-    
-    keyboard_buttons.append(nav_row)
-    keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Return to Action Menu", callback_data="back_to_menu")])
-
-    kb_paginated = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-    await msg_obj.answer(out, reply_markup=kb_paginated, parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("catalog_page_"), ResellerStates.awaiting_patch_choice)
-async def process_catalog_page_navigation(callback: CallbackQuery, state: FSMContext):
-    page_num = int(callback.data.replace("catalog_page_", ""))
-    await callback.answer()
-    
-    await callback.message.delete()
-    await send_paginated_catalog(callback.message, page=page_num, state=state)
-
-# --- INLINE PREVIEW CAR INJECTION HANDLERS (ON-DEMAND PREVIEWS) ---
-
-@dp.callback_query(F.data.startswith("inject_car_id_"), ResellerStates.awaiting_patch_choice)
-async def process_inline_car_injection(callback: CallbackQuery, state: FSMContext):
-    car_id = callback.data.replace("inject_car_id_", "")
-    await callback.answer()
-    
-    car_db, car_maps = await load_db_data_async()
-    car_data = car_db[car_id]
-    mapping = car_maps.get(car_id, {})
-    name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
-    img_url = mapping.get("image_url")
-    
-    info = (
-        f"🏎️ *Model Preview:* {name}\n"
-        f"💰 *Price:* Reseller Free\n"
-        f"🛡️ *Injection Safety:* Guaranteed\n\n"
-        "Would you like to inject this vehicle into your customer's garage?"
+    pool = await asyncpg.create_pool(
+        dsn=DATABASE_URL, 
+        ssl="require",
+        statement_cache_size=0 # Disables statement caching for PgBouncer compatibility
     )
     
-    kb_confirm = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ Confirm Injection", callback_data=f"confirm_inject_{car_id}")],
-            [InlineKeyboardButton(text="⬅️ Back to Car List", callback_data="back_to_catalog")]
-        ]
-    )
-    
-    await callback.message.delete()
-    try:
-        if img_url and img_url != "N/A":
-            await callback.message.answer_photo(photo=img_url, caption=info, reply_markup=kb_confirm, parse_mode="Markdown")
-        else:
-            await callback.message.answer(info, reply_markup=kb_confirm, parse_mode="Markdown")
-    except Exception:
-        await callback.message.answer(info, reply_markup=kb_confirm, parse_mode="Markdown")
+    async with pool.acquire() as conn:
+        print("Synchronizing Database Schema...")
+        async with conn.transaction():
+            # 1. Core Tables
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id TEXT PRIMARY KEY, 
+                    gcash_number TEXT, 
+                    is_online BOOLEAN DEFAULT FALSE
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS mods (
+                    id INTEGER PRIMARY KEY, 
+                    name TEXT UNIQUE NOT NULL, 
+                    description TEXT, 
+                    price REAL DEFAULT 0, 
+                    image_url TEXT, 
+                    default_claims_max INTEGER DEFAULT 3, 
+                    src_email TEXT,
+                    src_pass TEXT,
+                    src_dev_id TEXT,
+                    src_carx_id TEXT
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS accounts (
+                    id SERIAL PRIMARY KEY, 
+                    mod_id INTEGER NOT NULL, 
+                    username TEXT NOT NULL, 
+                    password TEXT NOT NULL, 
+                    is_available BOOLEAN DEFAULT TRUE, 
+                    FOREIGN KEY (mod_id) REFERENCES mods(id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS "references" (
+                    ref_number TEXT PRIMARY KEY, 
+                    user_id TEXT NOT NULL, 
+                    mod_id INTEGER NOT NULL, 
+                    timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
+                    claims_used INTEGER DEFAULT 0, 
+                    claims_max INTEGER DEFAULT 1, 
+                    last_replacement_timestamp TIMESTAMPTZ, 
+                    FOREIGN KEY (mod_id) REFERENCES mods(id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS creation_jobs (
+                    job_id SERIAL PRIMARY KEY, 
+                    user_psid TEXT NOT NULL, 
+                    email TEXT NOT NULL, 
+                    password TEXT NOT NULL, 
+                    mod_id INTEGER NOT NULL, 
+                    status VARCHAR(20) DEFAULT 'pending', 
+                    result_message TEXT, 
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
+                    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    lang TEXT DEFAULT 'en'
+                )
+            """)
+            
+            # Reseller License Table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS licenses (
+                    key TEXT PRIMARY KEY, 
+                    expires_at TIMESTAMPTZ NOT NULL, 
+                    assigned_to TEXT,
+                    is_active BOOLEAN DEFAULT TRUE
+                )
+            """)
+            
+            # 2. Settings & Users
+            await conn.execute("""CREATE TABLE IF NOT EXISTS paused_users (user_id TEXT PRIMARY KEY)""")
+            await conn.execute("""CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)""")
+            await conn.execute("""
+                INSERT INTO app_settings (key, value) VALUES ('maintenance_mode', 'false') 
+                ON CONFLICT (key) DO NOTHING
+            """)
+            await conn.execute("""CREATE TABLE IF NOT EXISTS users (psid TEXT PRIMARY KEY, lang TEXT DEFAULT 'en')""")
 
-@dp.callback_query(F.data == "back_to_catalog", ResellerStates.awaiting_patch_choice)
-async def process_back_to_catalog(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    saved_page = data.get("last_catalog_page", 1)
-    
-    await send_paginated_catalog(callback.message, page=saved_page, state=state)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-@dp.callback_query(F.data.startswith("confirm_inject_"), ResellerStates.awaiting_patch_choice)
-async def process_confirmed_car_injection(callback: CallbackQuery, state: FSMContext):
-    car_id = callback.data.replace("confirm_inject_", "")
-    await callback.answer()
-    
-    await callback.message.answer(f"⏳ Patcher running... Injecting vehicle.")
-    asyncio.create_task(
-        execute_reseller_patch_task(
-            callback.message, state, 'inject_car', target_car_id=car_id
-        )
-    )
-
-# --- CUSTOM RESOURCE SEQUENCER ---
-
-@dp.message(ResellerStates.awaiting_custom_silver)
-@dp.callback_query(F.data == "skip_step", ResellerStates.awaiting_custom_silver)
-async def process_silver(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else "skip"
-    silver = 0.0 if choice == "skip" else float(choice.replace(",", ""))
-    
-    await state.update_data(silver_val=silver)
-    msg = "✨ Enter the amount of Gold to add:\n\n👉 Type 'skip' or press below to skip."
-    
-    if isinstance(event, Message):
-        await event.answer(msg, reply_markup=get_skip_keyboard())
-    else:
-        await event.answer()
-        await event.message.edit_text(msg, reply_markup=get_skip_keyboard())
-        
-    await state.set_state(ResellerStates.awaiting_custom_gold)
-
-@dp.message(ResellerStates.awaiting_custom_gold)
-@dp.callback_query(F.data == "skip_step", ResellerStates.awaiting_custom_gold)
-async def process_gold(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else "skip"
-    gold = 0 if choice == "skip" else int(choice.replace(",", ""))
-    
-    await state.update_data(gold_val=gold)
-    msg = "📈 Enter the amount of XP to add:\n\n👉 Type 'skip' or press below to skip."
-    
-    if isinstance(event, Message):
-        await event.answer(msg, reply_markup=get_skip_keyboard())
-    else:
-        await event.answer()
-        await event.message.edit_text(msg, reply_markup=get_skip_keyboard())
-        
-    await state.set_state(ResellerStates.awaiting_custom_xp)
-
-@dp.message(ResellerStates.awaiting_custom_xp)
-@dp.callback_query(F.data == "skip_step", ResellerStates.awaiting_custom_xp)
-async def process_xp(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else "skip"
-    xp = 0 if choice == "skip" else int(choice.replace(",", ""))
-    
-    data = await state.get_data()
-    tier = data.get("license_tier", "premium")
-    msg_obj = event if isinstance(event, Message) else event.message
-    if not isinstance(event, Message):
-        await event.answer()
-
-    # Cancel if all skipped
-    if data.get('silver_val', 0.0) == 0.0 and data.get('gold_val', 0) == 0 and xp == 0:
-        await msg_obj.answer("⚠️ All fields skipped. Patch cancelled.")
-        await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
-        await state.set_state(ResellerStates.awaiting_patch_choice)
-        return
-
-    await msg_obj.answer("⏳ Patcher queueing with custom values... Execution in progress.")
-    asyncio.create_task(
-        execute_reseller_patch_task(
-            msg_obj, state, 'custom',
-            custom_silver=data['silver_val'],
-            custom_gold=data['gold_val'],
-            custom_xp=xp
-        )
-    )
-
-# --- NITRO MANAGEMENT SUB-MENU & OPTIONS ---
-
-@dp.message(ResellerStates.awaiting_single_nitro_car_id)
-@dp.callback_query(F.data.startswith("nitro_"), ResellerStates.awaiting_patch_choice)
-async def process_nitro_options(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else event.data
-    msg_obj = event if isinstance(event, Message) else event.message
-    
-    if not isinstance(event, Message):
-        await event.answer()
-        
-    data = await state.get_data()
-    tier = data.get("license_tier", "premium")
-    
-    if choice in ["nitro_all", "all", "1"]:
-        await msg_obj.answer("⏳ Patcher queueing Max Nitro... Execution in progress.")
-        asyncio.create_task(execute_reseller_patch_task(msg_obj, state, 'nitro_all'))
-        
-    elif choice in ["nitro_single", "single", "2"]:
-        await msg_obj.answer("⏳ Loading garage profile...")
-        
+        # 3. Graceful Alterations (Database Migrations)
         try:
-            dev_id = uuid.uuid4().hex
-            async with httpx.AsyncClient(http2=True) as client:
-                client.headers.update({"User-Agent": "UnityPlayer/6000.0.64f1", "X-Project": "STREET"})
-                cont, h = await get_profile_injector(client, data['target_email'], data['target_pass'], dev_id)
-                profile = decrypt_payload(cont["compressed_data"])
-                garage = profile["cars"]["items"] if ("cars" in profile and "items" in profile["cars"]) else profile
-                owned_cars = [k for k in garage.keys() if k.isdigit() and isinstance(garage[k], dict)]
-                
-                if not owned_cars:
-                    await msg_obj.answer("❌ No cars found in this account.")
-                    await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
-                    await state.set_state(ResellerStates.awaiting_patch_choice)
-                    return
-                
-                out = "🏎️ *Owned Cars List* 🏎️\n\n"
-                for c_id in owned_cars:
-                    desc_id = garage[c_id].get("__desc_id", "Unknown")
-                    out += f"- ID: `{c_id}` : {desc_id}\n"
-                out += "\n👉 Please enter the exact Car ID from the list to apply Max Nitro to:\n\n👉 Type /start to cancel."
-                await msg_obj.answer(out, parse_mode="Markdown")
-                await state.set_state(ResellerStates.awaiting_single_nitro_car_id)
-                
-        except Exception as e:
-            await msg_obj.answer(f"❌ Failed to load garage: {e}")
-            await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
-            await state.set_state(ResellerStates.awaiting_patch_choice)
-    else:
-        # Received single Car ID text
-        car_id = choice
-        await msg_obj.answer(f"⏳ Patcher running... Applying Max Nitro to Car ID {car_id}.")
-        asyncio.create_task(execute_reseller_patch_task(msg_obj, state, 'nitro_single', target_car_id=car_id))
+            await conn.execute('ALTER TABLE mods DROP COLUMN x_coordinate')
+            await conn.execute('ALTER TABLE mods DROP COLUMN y_coordinate')
+        except asyncpg.exceptions.UndefinedColumnError:
+            pass
+            
+        try:
+            await conn.execute('ALTER TABLE mods ADD COLUMN src_email TEXT')
+            await conn.execute('ALTER TABLE mods ADD COLUMN src_pass TEXT')
+            await conn.execute('ALTER TABLE mods ADD COLUMN src_dev_id TEXT')
+            await conn.execute('ALTER TABLE mods ADD COLUMN src_carx_id TEXT')
+        except asyncpg.exceptions.DuplicateColumnError:
+            pass
 
-@dp.callback_query(F.data == "back_to_menu", ResellerStates.awaiting_patch_choice)
-async def process_back_btn(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    tier = data.get("license_tier", "premium")
-    await callback.message.edit_text(
-        "⚙️ *Select Patch Action* ⚙️",
-        reply_markup=get_patch_menu_keyboard(tier=tier),
-        parse_mode="Markdown"
-    )
-    await state.set_state(ResellerStates.awaiting_patch_choice)
+        # Automatically alter table to add missing "bound_user_id" column if it doesn't exist
+        try:
+            await conn.execute('ALTER TABLE licenses ADD COLUMN bound_user_id TEXT')
+            print("📡 Added 'bound_user_id' column to existing licenses table.")
+        except asyncpg.exceptions.DuplicateColumnError:
+            pass
 
-# --- 🚨 CATCH-ALL ACTION MENU ROUTER (DEFINED LAST FOR ROUTING PRIORITY) 🚨 ---
+        # Automatically alter table to add missing "tier" column if it doesn't exist
+        try:
+            await conn.execute("ALTER TABLE licenses ADD COLUMN tier TEXT DEFAULT 'premium'")
+            print("📡 Added 'tier' column to existing licenses table.")
+        except asyncpg.exceptions.DuplicateColumnError:
+            pass
 
-@dp.message(ResellerStates.awaiting_patch_choice)
-@dp.callback_query(ResellerStates.awaiting_patch_choice)
-async def process_patch_selection(event, state: FSMContext):
-    choice = event.text.strip() if isinstance(event, Message) else event.data
-    msg_obj = event if isinstance(event, Message) else event.message
+        print('✅ Database synchronized successfully.')
+
+# --- AUTOMATION & JOB TRACKING ---
+
+async def create_account_creation_job(user_psid: str, email: str, password: str, mod_id: int, lang: str = 'en') -> int:
+    async with pool.acquire() as conn:
+        query = """
+            INSERT INTO creation_jobs (user_psid, email, password, mod_id, status, lang) 
+            VALUES ($1, $2, $3, $4, 'processing', $5) RETURNING job_id
+        """
+        return await conn.fetchval(query, user_psid, email, password, mod_id, lang)
+
+async def get_job_by_id(job_id: int):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM creation_jobs WHERE job_id = $1', job_id)
+        return dict(row) if row else None
+
+async def update_job_status(job_id: int, new_status: str, result_message: str = None):
+    async with pool.acquire() as conn:
+        query = """
+            UPDATE creation_jobs 
+            SET status = $1, result_message = $2, updated_at = CURRENT_TIMESTAMP 
+            WHERE job_id = $3
+        """
+        await conn.execute(query, new_status, result_message, job_id)
+
+async def get_creation_jobs():
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT job_id, user_psid, status, result_message FROM creation_jobs ORDER BY created_at DESC LIMIT 15')
+        return [dict(row) for row in rows]
+
+# --- ADMIN & APP SETTINGS ---
+
+async def is_admin(user_id: str):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM admins WHERE user_id = $1', user_id)
+        return dict(row) if row else None
+
+async def get_admin_info():
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM admins LIMIT 1')
+        return dict(row) if row else None
+
+async def update_admin_info(user_id: str, gcash_number: str):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO admins (user_id, gcash_number) VALUES ($1, $2) 
+            ON CONFLICT (user_id) DO UPDATE SET gcash_number = $2
+        """, user_id, gcash_number)
+
+async def set_admin_online_status(is_online: bool):
+    async with pool.acquire() as conn:
+        await conn.execute('UPDATE admins SET is_online = $1', is_online)
+
+async def get_maintenance_status() -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM app_settings WHERE key = 'maintenance_mode'")
+        return row['value'] == 'true' if row else False
+
+async def set_maintenance_status(is_maintenance: bool):
+    async with pool.acquire() as conn:
+        val = 'true' if is_maintenance else 'false'
+        await conn.execute("UPDATE app_settings SET value = $1 WHERE key = 'maintenance_mode'", val)
+
+# --- MOD & INVENTORY MANAGEMENT ---
+
+async def get_mods():
+    async with pool.acquire() as conn:
+        query = """
+            SELECT m.id, m.name, m.description, m.price, m.image_url, m.default_claims_max, 
+            (SELECT COUNT(*) FROM accounts WHERE mod_id = m.id AND is_available = TRUE) as stock 
+            FROM mods m ORDER BY m.id
+        """
+        rows = await conn.fetch(query)
+        return [dict(row) for row in rows]
+
+async def get_mod_by_id(mod_id: int):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM mods WHERE id = $1', mod_id)
+        return dict(row) if row else None
+
+async def get_mods_by_price(price: float):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT * FROM mods WHERE price BETWEEN $1 AND $2', price - 0.01, price + 0.01)
+        return [dict(row) for row in rows]
+
+async def add_mod(mod_id: int, name: str, desc: str, price: float, img: str, claims: int):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO mods (id, name, description, price, image_url, default_claims_max) 
+            VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT(id) DO NOTHING
+        """, mod_id, name, desc, price, img, claims)
+
+async def update_mod_details(mod_id: int, details: dict):
+    if not details:
+        return
     
-    # Bypass callback routing collisions (forces pagination/inline-injects to bypass the menu)
-    if isinstance(event, CallbackQuery) and (
-        choice.startswith("inject_car_id_") or 
-        choice.startswith("catalog_page_") or 
-        choice.startswith("confirm_inject_") or 
-        choice == "back_to_catalog" or 
-        choice == "back_to_menu" or
-        choice == "premium_locked"
-    ):
-        return
-        
-    if not isinstance(event, Message):
-        await event.answer()
-        
-    choice_map = {
-        'patch_safe_1': 'safe_1', '1': 'safe_1',
-        'patch_safe_2': 'safe_2', '2': 'safe_2',
-        'patch_custom': 'custom', '3': 'custom',
-        'patch_nitro_menu': 'nitro_menu', '4': 'nitro_menu',
-        'patch_maps': 'maps', '5': 'maps',
-        'patch_inject_car': 'inject_car', '6': 'inject_car',
-        'switch_account': 'switch_account', '7': 'switch_account',
-        'cancel_session': 'cancel_session', '8': 'cancel_session'
-    }
+    set_clauses = []
+    values = []
+    for i, (k, v) in enumerate(details.items(), start=1):
+        set_clauses.append(f"{k} = ${i}")
+        values.append(v)
     
-    action = choice_map.get(choice)
-    data = await state.get_data()
-    tier = data.get("license_tier", "premium")
+    values.append(mod_id)
+    query = f"UPDATE mods SET {', '.join(set_clauses)} WHERE id = ${len(values)}"
+    
+    async with pool.acquire() as conn:
+        await conn.execute(query, *values)
 
-    if not action:
-        await msg_obj.answer("❌ Invalid selection. Please select from the menu.", reply_markup=get_patch_menu_keyboard(tier=tier))
-        return
+# --- ACCOUNT & REFERENCE MANAGEMENT ---
 
-    # Security Guard: Block Free accounts trying to run Premium Actions
-    premium_actions = ['safe_1', 'custom', 'nitro_menu', 'maps', 'inject_car']
-    if action in premium_actions and tier == "free":
-        await msg_obj.answer(
-            "🔒 *Premium Feature Locked.*\n\n"
-            "This action is restricted to accounts with a *Premium License Key*.\n"
-            "Your current key is registered on the Free tier.\n\n"
-            "To buy Premium access, contact support:\n"
-            "💬 t.me/ImZhouFann",
-            reply_markup=get_patch_menu_keyboard(tier=tier),
-            parse_mode="Markdown"
-        )
-        return
+async def add_bulk_accounts(mod_id: int, accounts: list):
+    async with pool.acquire() as conn:
+        query = 'INSERT INTO accounts (mod_id, username, password) VALUES ($1, $2, $3)'
+        values = [(mod_id, acc['username'], acc['password']) for acc in accounts]
+        await conn.executemany(query, values)
 
-    if action == "cancel_session":
-        await state.clear()
-        await msg_obj.answer("🚪 Session ended. Type /start to login again.")
-        return
+async def add_reference(ref: str, user_id: str, mod_id: int) -> int:
+    mod = await get_mod_by_id(mod_id)
+    if not mod:
+        raise Exception(f"Mod {mod_id} not found.")
+    
+    claims_max = mod.get('default_claims_max') or 1
+    
+    async with pool.acquire() as conn:
+        res = await conn.execute("""
+            INSERT INTO "references" (ref_number, user_id, mod_id, claims_max) 
+            VALUES ($1, $2, $3, $4) ON CONFLICT (ref_number) DO NOTHING
+        """, ref, user_id, mod_id, claims_max)
         
-    elif action == "switch_account":
-        await msg_obj.answer("📧 Enter the target CarX Street account Email:")
-        await state.set_state(ResellerStates.awaiting_email)
-        return
+        if res == 'INSERT 0 0':
+            raise Exception('Duplicate reference number')
+            
+    return claims_max
 
-    elif action == "custom":
-        await msg_obj.answer(
-            "💰 Enter the amount of Silver to add:\n\n👉 Type 'skip' or press the button below to skip.",
-            reply_markup=get_skip_keyboard()
-        )
-        await state.set_state(ResellerStates.awaiting_custom_silver)
-        return
+async def add_bulk_references(mod_id: int, ref_numbers: list) -> dict:
+    successful_adds = 0
+    duplicates = []
+    invalids = []
+    
+    mod = await get_mod_by_id(mod_id)
+    if not mod:
+        raise Exception(f"Mod {mod_id} not found.")
+    
+    claims_max = mod.get('default_claims_max') or 1
 
-    elif action == "nitro_menu":
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="⚡ Max All Cars", callback_data="nitro_all")],
-                [InlineKeyboardButton(text="🚗 Select Single Car", callback_data="nitro_single")],
-                [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_menu")]
-            ]
-        )
-        await msg_obj.answer(
-            "Do you want to apply Max Nitro to ALL cars or a single car?\n\n"
-            "👉 Type *1* for Max All Cars\n"
-            "👉 Type *2* to Select a Single Car", 
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
-        return
+    async with pool.acquire() as conn:
+        for ref in ref_numbers:
+            if not isinstance(ref, str) or not ref.isdigit() or len(ref) != 13:
+                invalids.append(ref)
+                continue
+            
+            res = await conn.execute("""
+                INSERT INTO "references" (ref_number, user_id, mod_id, claims_max) 
+                VALUES ($1, 'ADMIN_ADDED', $2, $3) ON CONFLICT (ref_number) DO NOTHING
+            """, ref, mod_id, claims_max)
+            
+            if res == 'INSERT 0 0':
+                duplicates.append(ref)
+            else:
+                successful_adds += 1
+                
+    return {"successfulAdds": successful_adds, "duplicates": duplicates, "invalids": invalids}
 
-    elif action == "inject_car":
-        # Load vehicles and display the interactive Paginated Menu (Page 1)
-        await send_paginated_catalog(msg_obj, page=1, state=state)
-        return
+async def get_reference(ref_number: str):
+    async with pool.acquire() as conn:
+        query = 'SELECT r.*, m.name as mod_name FROM "references" r JOIN mods m ON r.mod_id = m.id WHERE r.ref_number = $1'
+        row = await conn.fetchrow(query, ref_number)
+        return dict(row) if row else None
 
-    # Trigger operations (safe_2, or safe_1/maps if on Premium Key)
-    await msg_obj.answer("⏳ Patcher queueing... Execution in progress.")
-    asyncio.create_task(
-        execute_reseller_patch_task(
-            msg_obj, state, action
-        )
-)
+async def get_all_references():
+    async with pool.acquire() as conn:
+        query = 'SELECT r.ref_number, r.user_id, r.claims_used, r.claims_max, m.name as mod_name FROM "references" r JOIN mods m ON r.mod_id = m.id ORDER BY r.timestamp DESC'
+        rows = await conn.fetch(query)
+        return [dict(row) for row in rows]
+
+async def delete_reference(ref_number: str) -> int:
+    async with pool.acquire() as conn:
+        res = await conn.execute('DELETE FROM "references" WHERE ref_number = $1', ref_number)
+        return int(res.split(' ')[1])
+
+async def get_available_account(mod_id: int):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM accounts WHERE mod_id = $1 AND is_available = TRUE LIMIT 1', mod_id)
+        return dict(row) if row else None
+
+async def claim_account(account_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute('UPDATE accounts SET is_available = FALSE WHERE id = $1', account_id)
+
+async def use_claim(ref_number: str):
+    async with pool.acquire() as conn:
+        await conn.execute('UPDATE "references" SET claims_used = claims_used + 1, last_replacement_timestamp = CURRENT_TIMESTAMP WHERE ref_number = $1', ref_number)
+
+async def update_reference_mod(ref: str, new_mod_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute('UPDATE "references" SET mod_id = $1 WHERE ref_number = $2', new_mod_id, ref)
+
+async def update_reference_claims(ref: str, used: int, max_claims: int) -> int:
+    async with pool.acquire() as conn:
+        res = await conn.execute('UPDATE "references" SET claims_used = $1, claims_max = $2 WHERE ref_number = $3', used, max_claims, ref)
+        return int(res.split(' ')[1])
+
+async def delete_accounts_by_mod_id(mod_id: int) -> int:
+    async with pool.acquire() as conn:
+        res = await conn.execute('DELETE FROM accounts WHERE mod_id = $1 AND is_available = TRUE', mod_id)
+        return int(res.split(' ')[1])
+
+# --- USER MANAGEMENT ---
+
+async def add_user(psid: str, lang: str = 'en'):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users (psid, lang) VALUES ($1, $2) 
+            ON CONFLICT (psid) DO UPDATE SET lang = EXCLUDED.lang
+        """, psid, lang)
+
+async def get_user(psid: str):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM users WHERE psid = $1', psid)
+        return dict(row) if row else None
+
+async def get_all_user_psids():
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT psid FROM users')
+        return [row['psid'] for row in rows]
+
+async def is_user_paused(user_id: str) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT user_id FROM paused_users WHERE user_id = $1', user_id)
+        return bool(row)
+
+async def pause_user(user_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute('INSERT INTO paused_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING', user_id)
+
+async def resume_user(user_id: str):
+    async with pool.acquire() as conn:
+        await conn.execute('DELETE FROM paused_users WHERE user_id = $1', user_id)
+
+# --- REPORTING ---
+
+async def get_sales_statistics(period: str):
+    intervals = {'daily': '1 day', 'weekly': '7 days', 'monthly': '30 days'}
+    interval = intervals.get(period)
+    if not interval:
+        raise Exception('Invalid period.')
+    
+    query = f"""
+        SELECT m.name, COUNT(r.ref_number) as sales_count, SUM(m.price) as total_revenue
+        FROM "references" r
+        JOIN mods m ON r.mod_id = m.id
+        WHERE r.timestamp >= NOW() - INTERVAL '{interval}'
+        GROUP BY m.name
+        ORDER BY total_revenue DESC;
+    """
+    
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query)
+        return [dict(row) for row in rows]
+
+# --- LICENSE SYSTEM Helper Query Functions ---
+
+async def add_license_key(key: str, days: int, assigned_to: str, tier: str = 'premium'):
+    """Adds a reseller license key with a specified tier ('free' or 'premium')."""
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO licenses (key, expires_at, assigned_to, tier) 
+            VALUES ($1, CURRENT_TIMESTAMP + ($2 * INTERVAL '1 day'), $3, $4)
+            ON CONFLICT (key) DO UPDATE SET 
+                expires_at = CURRENT_TIMESTAMP + ($2 * INTERVAL '1 day'), 
+                assigned_to = EXCLUDED.assigned_to, 
+                tier = EXCLUDED.tier,
+                is_active = TRUE
+        """, key, days, assigned_to, tier)
+
+async def get_all_licenses():
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT key, expires_at, assigned_to, is_active, tier,
+                   EXTRACT(epoch FROM (expires_at - NOW())) / 86400 AS days_remaining
+            FROM licenses
+            ORDER BY expires_at DESC
+        """)
+        return [dict(row) for row in rows]
+
+async def deactivate_license_key(key: str) -> int:
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM licenses WHERE key = $1", key)
+        return int(res.split(' ')[1])
+
+async def verify_license_key(key: str, user_id: str) -> dict:
+    """Checks key validity and handles automatic one-device/one-user binding."""
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT expires_at, bound_user_id, is_active, tier 
+            FROM licenses 
+            WHERE key = $1 AND is_active = TRUE AND expires_at > CURRENT_TIMESTAMP
+        """, key)
+        
+        if not row:
+            return None # Invalid or expired
+            
+        bound_id = row["bound_user_id"]
+        tier = row["tier"] or "premium"
+        
+        # 1. If key is unbound, lock it to this user/device ID
+        if not bound_id:
+            await conn.execute("""
+                UPDATE licenses 
+                SET bound_user_id = $1 
+                WHERE key = $2
+            """, user_id, key)
+            return {"expires_at": row["expires_at"], "bound": True, "tier": tier}
+            
+        # 2. If already bound, verify it matches
+        if bound_id == user_id:
+            return {"expires_at": row["expires_at"], "bound": True, "tier": tier}
+            
+        # Already bound to another user/device
+        return {"expires_at": row["expires_at"], "bound": False, "tier": tier}
