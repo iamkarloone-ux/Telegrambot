@@ -96,16 +96,25 @@ async def process_password(message: Message, state: FSMContext):
 
 # --- 🛑 SPECIFIC SUB-HANDLERS (DEFINED FIRST FOR ROUTING PRIORITY) 🛑 ---
 
-# --- PREMIUM LOCKED POPUP TRIGGER ---
+# --- PREMIUM LOCKED ACTION HANDLER ---
 
 @dp.callback_query(F.data == "premium_locked", ResellerStates.awaiting_patch_choice)
 async def process_premium_locked(callback: CallbackQuery, state: FSMContext):
+    """Edits the menu message to show the lock notice with a back button."""
     await callback.answer("🔒 Feature Locked!", show_alert=True)
-    await callback.message.answer(
+    
+    kb_back = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_menu")]
+        ]
+    )
+    
+    await callback.message.edit_text(
         "❌ *Premium Feature Locked.*\n\n"
         "Your current key is registered on our *Free tier* (only Ban-Safe Pack 2 is active).\n"
         "To purchase Premium access, contact the developer:\n"
         "💬 t.me/ImZhouFann",
+        reply_markup=kb_back,
         parse_mode="Markdown"
     )
 
@@ -396,13 +405,18 @@ async def process_patch_selection(event, state: FSMContext):
     # Security Guard: Block Free accounts trying to run Premium Actions
     premium_actions = ['safe_1', 'custom', 'nitro_menu', 'maps', 'inject_car']
     if action in premium_actions and tier == "free":
+        kb_back = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_menu")]
+            ]
+        )
         await msg_obj.answer(
             "🔒 *Premium Feature Locked.*\n\n"
             "This action is restricted to accounts with a *Premium License Key*.\n"
             "Your current key is registered on the Free tier.\n\n"
             "To buy Premium access, contact support:\n"
             "💬 t.me/ImZhouFann",
-            reply_markup=get_patch_menu_keyboard(tier=tier),
+            reply_markup=kb_back,
             parse_mode="Markdown"
         )
         return
@@ -453,4 +467,4 @@ async def process_patch_selection(event, state: FSMContext):
         execute_reseller_patch_task(
             msg_obj, state, action
         )
-)
+    )
