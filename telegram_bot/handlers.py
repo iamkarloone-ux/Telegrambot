@@ -20,7 +20,6 @@ from telegram_bot.patcher import (
     execute_reseller_patch_task
 )
 
-# Initialize Bot and Dispatcher locally inside handlers to allow clean imports in main.py
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
@@ -41,7 +40,6 @@ async def cmd_start(message: Message, state: FSMContext):
 @dp.message(ResellerStates.awaiting_key)
 async def process_key(message: Message, state: FSMContext):
     key = message.text.strip()
-    # Pass Telegram user ID to verify and handle license key binding
     license_info = await verify_license_key(key, str(message.from_user.id))
     
     if not license_info:
@@ -61,8 +59,11 @@ async def process_key(message: Message, state: FSMContext):
         )
         return
 
-    await state.update_data(license_key=key)
-    await message.answer("✅ License verified successfully!\n\n📧 Enter target CarX Street account Email:")
+    tier_level = license_info.get("tier", "premium")
+    tier_display = "⭐ PREMIUM" if tier_level == "premium" else "🆕 FREE"
+    
+    await state.update_data(license_key=key, license_tier=tier_level)
+    await message.answer(f"✅ License verified successfully! ({tier_display})\n\n📧 Enter target CarX Street account Email:")
     await state.set_state(ResellerStates.awaiting_email)
 
 @dp.message(ResellerStates.awaiting_email)
@@ -81,10 +82,13 @@ async def process_password(message: Message, state: FSMContext):
     password = message.text.strip()
     await state.update_data(target_pass=password)
     
+    data = await state.get_data()
+    tier = data.get("license_tier", "premium")
+    
     await message.answer(
         "⚙️ *Select Patch Action* ⚙️\n\n"
         "Select an option below, or manually type your selection number.",
-        reply_markup=get_patch_menu_keyboard(),
+        reply_markup=get_patch_menu_keyboard(tier=tier),
         parse_mode="Markdown"
     )
     await state.set_state(ResellerStates.awaiting_patch_choice)
@@ -92,10 +96,22 @@ async def process_password(message: Message, state: FSMContext):
 
 # --- 🛑 SPECIFIC SUB-HANDLERS (DEFINED FIRST FOR ROUTING PRIORITY) 🛑 ---
 
+# --- PREMIUM LOCKED POPUP TRIGGER ---
+
+@dp.callback_query(F.data == "premium_locked", ResellerStates.awaiting_patch_choice)
+async def process_premium_locked(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("🔒 Feature Locked!", show_alert=True)
+    await callback.message.answer(
+        "❌ *Premium Feature Locked.*\n\n"
+        "Your current key is registered on our *Free tier* (only Ban-Safe Pack 2 is active).\n"
+        "To purchase Premium access, contact the developer:\n"
+        "💬 t.me/ImZhouFann",
+        parse_mode="Markdown"
+    )
+
 # --- PAGINATED INJECT CATALOG ROUTING ---
 
 async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext):
-    """Downloads vehicle database and outputs a clean, paginated, safe inline-button list."""
     await state.update_data(last_catalog_page=page)
     
     car_db, car_maps = await load_db_data_async()
@@ -119,7 +135,6 @@ async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext)
     for car_id in page_cars:
         car_data = car_db[car_id]
         mapping = car_maps.get(car_id, {})
-        # Falls back cleanly to internal __desc_id string if missing in car_images.json
         name = mapping.get("name", car_data.get("__desc_id", f"Car {car_id}"))
         
         out += f"• *{name}* (Price: Reseller Free)\n"
@@ -140,11 +155,9 @@ async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext)
 
 @dp.callback_query(F.data.startswith("catalog_page_"), ResellerStates.awaiting_patch_choice)
 async def process_catalog_page_navigation(callback: CallbackQuery, state: FSMContext):
-    """Processes previous/next page swaps inside FSM state."""
     page_num = int(callback.data.replace("catalog_page_", ""))
     await callback.answer()
     
-    # Edits existing list to swap pages instantly without cluttering the chat history
     await callback.message.delete()
     await send_paginated_catalog(callback.message, page=page_num, state=state)
 
@@ -152,7 +165,6 @@ async def process_catalog_page_navigation(callback: CallbackQuery, state: FSMCon
 
 @dp.callback_query(F.data.startswith("inject_car_id_"), ResellerStates.awaiting_patch_choice)
 async def process_inline_car_injection(callback: CallbackQuery, state: FSMContext):
-    """Renders a single on-demand visual confirmation card, bypassing flood limits."""
     car_id = callback.data.replace("inject_car_id_", "")
     await callback.answer()
     
@@ -187,7 +199,6 @@ async def process_inline_car_injection(callback: CallbackQuery, state: FSMContex
 
 @dp.callback_query(F.data == "back_to_catalog", ResellerStates.awaiting_patch_choice)
 async def process_back_to_catalog(callback: CallbackQuery, state: FSMContext):
-    """Reads saved memory index and swaps cleanly back to the exact catalog page."""
     await callback.answer()
     data = await state.get_data()
     saved_page = data.get("last_catalog_page", 1)
@@ -200,7 +211,6 @@ async def process_back_to_catalog(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_inject_"), ResellerStates.awaiting_patch_choice)
 async def process_confirmed_car_injection(callback: CallbackQuery, state: FSMContext):
-    """Executes the confirmed injection from the card."""
     car_id = callback.data.replace("confirm_inject_", "")
     await callback.answer()
     
@@ -254,6 +264,7 @@ async def process_xp(event, state: FSMContext):
     xp = 0 if choice == "skip" else int(choice.replace(",", ""))
     
     data = await state.get_data()
+    tier = data.get("license_tier", "premium")
     msg_obj = event if isinstance(event, Message) else event.message
     if not isinstance(event, Message):
         await event.answer()
@@ -261,7 +272,7 @@ async def process_xp(event, state: FSMContext):
     # Cancel if all skipped
     if data.get('silver_val', 0.0) == 0.0 and data.get('gold_val', 0) == 0 and xp == 0:
         await msg_obj.answer("⚠️ All fields skipped. Patch cancelled.")
-        await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(), parse_mode="Markdown")
+        await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
         await state.set_state(ResellerStates.awaiting_patch_choice)
         return
 
@@ -285,6 +296,9 @@ async def process_nitro_options(event, state: FSMContext):
     
     if not isinstance(event, Message):
         await event.answer()
+        
+    data = await state.get_data()
+    tier = data.get("license_tier", "premium")
     
     if choice in ["nitro_all", "all", "1"]:
         await msg_obj.answer("⏳ Patcher queueing Max Nitro... Execution in progress.")
@@ -292,7 +306,6 @@ async def process_nitro_options(event, state: FSMContext):
         
     elif choice in ["nitro_single", "single", "2"]:
         await msg_obj.answer("⏳ Loading garage profile...")
-        data = await state.get_data()
         
         try:
             dev_id = uuid.uuid4().hex
@@ -305,7 +318,7 @@ async def process_nitro_options(event, state: FSMContext):
                 
                 if not owned_cars:
                     await msg_obj.answer("❌ No cars found in this account.")
-                    await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(), parse_mode="Markdown")
+                    await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
                     await state.set_state(ResellerStates.awaiting_patch_choice)
                     return
                 
@@ -319,7 +332,7 @@ async def process_nitro_options(event, state: FSMContext):
                 
         except Exception as e:
             await msg_obj.answer(f"❌ Failed to load garage: {e}")
-            await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(), parse_mode="Markdown")
+            await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
             await state.set_state(ResellerStates.awaiting_patch_choice)
     else:
         # Received single Car ID text
@@ -330,9 +343,11 @@ async def process_nitro_options(event, state: FSMContext):
 @dp.callback_query(F.data == "back_to_menu", ResellerStates.awaiting_patch_choice)
 async def process_back_btn(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    data = await state.get_data()
+    tier = data.get("license_tier", "premium")
     await callback.message.edit_text(
         "⚙️ *Select Patch Action* ⚙️",
-        reply_markup=get_patch_menu_keyboard(),
+        reply_markup=get_patch_menu_keyboard(tier=tier),
         parse_mode="Markdown"
     )
     await state.set_state(ResellerStates.awaiting_patch_choice)
@@ -351,7 +366,8 @@ async def process_patch_selection(event, state: FSMContext):
         choice.startswith("catalog_page_") or 
         choice.startswith("confirm_inject_") or 
         choice == "back_to_catalog" or 
-        choice == "back_to_menu"
+        choice == "back_to_menu" or
+        choice == "premium_locked"
     ):
         return
         
@@ -370,11 +386,26 @@ async def process_patch_selection(event, state: FSMContext):
     }
     
     action = choice_map.get(choice)
+    data = await state.get_data()
+    tier = data.get("license_tier", "premium")
+
     if not action:
-        await msg_obj.answer("❌ Invalid selection. Please select from the menu.", reply_markup=get_patch_menu_keyboard())
+        await msg_obj.answer("❌ Invalid selection. Please select from the menu.", reply_markup=get_patch_menu_keyboard(tier=tier))
         return
 
-    data = await state.get_data()
+    # Security Guard: Block Free accounts trying to run Premium Actions
+    premium_actions = ['safe_1', 'custom', 'nitro_menu', 'maps', 'inject_car']
+    if action in premium_actions and tier == "free":
+        await msg_obj.answer(
+            "🔒 *Premium Feature Locked.*\n\n"
+            "This action is restricted to accounts with a *Premium License Key*.\n"
+            "Your current key is registered on the Free tier.\n\n"
+            "To buy Premium access, contact support:\n"
+            "💬 t.me/ImZhouFann",
+            reply_markup=get_patch_menu_keyboard(tier=tier),
+            parse_mode="Markdown"
+        )
+        return
 
     if action == "cancel_session":
         await state.clear()
@@ -416,10 +447,10 @@ async def process_patch_selection(event, state: FSMContext):
         await send_paginated_catalog(msg_obj, page=1, state=state)
         return
 
-    # Trigger instant operations (safe_1, safe_2, maps)
+    # Trigger operations (safe_2, or safe_1/maps if on Premium Key)
     await msg_obj.answer("⏳ Patcher queueing... Execution in progress.")
     asyncio.create_task(
         execute_reseller_patch_task(
             msg_obj, state, action
         )
-    )
+)
