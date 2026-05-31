@@ -129,33 +129,59 @@ async def execute_reseller_patch_task(
             garage = profile["cars"]["items"] if ("cars" in profile and "items" in profile["cars"]) else profile
             
             summary_actions = []
-            res = profile.get("resources", {})
-            if "experience" not in res or not isinstance(res["experience"], dict):
-                res["experience"] = {"amount": 0}
-            current_xp = res["experience"].get("amount", 0)
             
+            # 1. Structure Validation & Repair (Prevents crashes on raw 0-balance accounts)
+            res = profile.setdefault("resources", {})
+            if not isinstance(res, dict) or res is None:
+                res = {}
+                profile["resources"] = res
+
+            # Repair soft (Silver)
+            if "soft" not in res or not isinstance(res["soft"], dict) or res["soft"] is None:
+                res["soft"] = {"amount": 0.0}
+            elif "amount" not in res["soft"] or res["soft"]["amount"] is None:
+                res["soft"]["amount"] = 0.0
+
+            # Repair hard (Gold)
+            if "hard" not in res or not isinstance(res["hard"], dict) or res["hard"] is None:
+                res["hard"] = {"amount": 0}
+            elif "amount" not in res["hard"] or res["hard"]["amount"] is None:
+                res["hard"]["amount"] = 0
+
+            # Repair experience (XP)
+            if "experience" not in res or not isinstance(res["experience"], dict) or res["experience"] is None:
+                res["experience"] = {"amount": 0}
+            elif "amount" not in res["experience"] or res["experience"]["amount"] is None:
+                res["experience"]["amount"] = 0
+            
+            current_xp = int(res["experience"]["amount"])
+            
+            # --- Modification: Ban Safe Pack 1 (10M Silver + 6k Gold) ---
             if action == 'safe_1':
-                res.setdefault("soft", {"amount": 0.0})["amount"] += 10000000.0
-                res.setdefault("hard", {"amount": 0})["amount"] += 6000
+                res["soft"]["amount"] = float(res["soft"]["amount"]) + 10000000.0
+                res["hard"]["amount"] = int(res["hard"]["amount"]) + 6000
                 profile["resources"] = res
                 summary_actions.append("💰 Applied Ban-Safe Pack 1 (+10M Silver, +6k Gold)")
 
+            # --- Modification: Ban Safe Pack 2 (6M Silver + 1k Gold) ---
             elif action == 'safe_2':
-                res.setdefault("soft", {"amount": 0.0})["amount"] += 6000000.0
-                res.setdefault("hard", {"amount": 0})["amount"] += 1000
+                res["soft"]["amount"] = float(res["soft"]["amount"]) + 6000000.0
+                res["hard"]["amount"] = int(res["hard"]["amount"]) + 1000
                 profile["resources"] = res
                 summary_actions.append("💰 Applied Ban-Safe Pack 2 (+6M Silver, +1k Gold)")
 
+            # --- Modification: Custom Input Values ---
             elif action == 'custom':
                 if custom_silver:
-                    res.setdefault("soft", {"amount": 0.0})["amount"] += float(custom_silver)
+                    res["soft"]["amount"] = float(res["soft"]["amount"]) + float(custom_silver)
                 if custom_gold:
-                    res.setdefault("hard", {"amount": 0})["amount"] += int(custom_gold)
+                    res["hard"]["amount"] = int(res["hard"]["amount"]) + int(custom_gold)
                 if custom_xp:
                     res["experience"]["amount"] = current_xp + int(custom_xp)
                 profile["resources"] = res
                 summary_actions.append(f"💰 Custom Resources added: +{custom_silver:,.0f} Silver, +{custom_gold:,} Gold, +{custom_xp:,} XP")
 
+            # --- Modification: Max Nitro (All cars) ---
             elif action in ['nitro', 'nitro_all']:
                 owned_cars = [k for k in garage.keys() if k.isdigit() and isinstance(garage[k], dict)]
                 if owned_cars:
@@ -168,6 +194,7 @@ async def execute_reseller_patch_task(
                         nitro["amount"] = 20000000
                     summary_actions.append(f"⚡ Maxed Nitro on {len(owned_cars)} car(s)")
 
+            # --- Modification: Max Nitro (Single selective car) ---
             elif action == 'nitro_single':
                 if target_car_id in garage:
                     current_timestamp = int(time.time())
@@ -179,6 +206,7 @@ async def execute_reseller_patch_task(
                     car_name = garage[target_car_id].get("__desc_id", f"Car {target_car_id}")
                     summary_actions.append(f"⚡ Maxed Nitro on specific Car: {car_name}")
 
+            # --- Modification: Map Region Unlocker ---
             elif action == 'maps':
                 world_parts = profile.setdefault("game_world_parts", {})
                 quests = profile.setdefault("quests", {})
@@ -197,6 +225,7 @@ async def execute_reseller_patch_task(
                     quest_node["rewarded"] = True
                 summary_actions.append("🗺️ Unlocked all map regions and bypassed quests")
 
+            # --- Modification: Inject Custom Car ---
             elif action == 'inject_car':
                 car_db, _ = await load_db_data_async()
                 existing_keys = sorted([int(k) for k in garage.keys() if k.isdigit()])
@@ -207,6 +236,7 @@ async def execute_reseller_patch_task(
                 garage[str(last_id)] = car_db[target_car_id]
                 
                 car_name = car_db[target_car_id].get("__desc_id", f"Car {target_car_id}")
+                # Clean, customer-facing delivery text (removed raw database IDs entirely)
                 summary_actions.append(f"🚗 Injected untouched {car_name} into your garage")
 
             # Encryption and Upload
