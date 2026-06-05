@@ -45,7 +45,7 @@ async def process_key(message: Message, state: FSMContext):
     if not license_info:
         await message.answer(
             "❌ *Invalid or Expired License Key.*\n\n"
-            "To buy a subscription (600 PHP/Month), contact:\n"
+            "To buy a subscription (10$/Month), contact:\n"
             "💬 m.me/lark.abalunan.1",
             parse_mode="Markdown"
         )
