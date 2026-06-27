@@ -48,16 +48,13 @@ async def purge_tracked_msgs(chat_id: int, state: FSMContext):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Greets user, cleans chat, and asks for reseller license key."""
-    try:
-        await message.delete()
-    except Exception:
-        pass
-        
+    """Greets user and asks for reseller license key. Keeps the start messages intact."""
+    # We purge tracked messages from previous operations, but DO NOT delete the /start message itself
     await purge_tracked_msgs(message.chat.id, state)
     await state.clear()
     
-    sent_msg = await message.answer(
+    # We send the welcome message and do NOT track it, so it remains in the history permanently
+    await message.answer(
         "🔑 *Reseller Patcher Tool* 🔑\n\n"
         "To access this tool, please enter your active Reseller License Key.\n\n"
         "Don't have a key? Message the developer to purchase access:\n"
@@ -66,12 +63,11 @@ async def cmd_start(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
     await state.set_state(ResellerStates.awaiting_key)
-    await track_msg(state, sent_msg.message_id)
 
 @dp.message(ResellerStates.awaiting_key)
 async def process_key(message: Message, state: FSMContext):
     try:
-        await message.delete() # Disappear input credentials
+        await message.delete() # Automatically deletes the key input for security
     except Exception:
         pass
         
@@ -112,7 +108,7 @@ async def process_key(message: Message, state: FSMContext):
 @dp.message(ResellerStates.awaiting_email)
 async def process_email(message: Message, state: FSMContext):
     try:
-        await message.delete() # Disappear email input
+        await message.delete() # Automatically deletes the email input
     except Exception:
         pass
         
@@ -132,7 +128,7 @@ async def process_email(message: Message, state: FSMContext):
 @dp.message(ResellerStates.awaiting_password)
 async def process_password(message: Message, state: FSMContext):
     try:
-        await message.delete() # Disappear password input
+        await message.delete() # Automatically deletes the password input
     except Exception:
         pass
         
@@ -355,7 +351,6 @@ async def process_xp(event, state: FSMContext):
     msg_obj = event if isinstance(event, Message) else event.message
     await purge_tracked_msgs(chat_id, state)
 
-    # Cancel if all skipped
     if data.get('silver_val', 0.0) == 0.0 and data.get('gold_val', 0) == 0 and xp == 0:
         sent_warn = await msg_obj.answer("⚠️ All fields skipped. Patch cancelled.")
         await asyncio.sleep(2)
@@ -599,4 +594,4 @@ async def process_patch_selection(event, state: FSMContext):
         execute_reseller_patch_task(
             sent_msg, state, action
         )
-    )
+            )
