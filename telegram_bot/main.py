@@ -6,31 +6,34 @@ from telegram_bot.config import TELEGRAM_BOT_TOKEN
 from telegram_bot.handlers import dp, bot
 
 async def dummy_port_binder():
-    """Spins up a lightweight background HTTP port binder to satisfy Render's Web Service health checks."""
+    """Spins up a stable, lightweight background HTTP port binder for Render health checks."""
     port = int(os.getenv("PORT", 8080))
     
     async def handle_client(reader, writer):
-        # Reads incoming scanner request
         try:
-            await reader.read(1024)
-        except Exception:
-            pass
-            
-        # Sends a basic HTTP 200 OK response
-        response = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 26\r\n"
-            "Connection: close\r\n\r\n"
-            "Telegram Bot is active! 🚀"
-        )
-        try:
+            # Short read timeout prevents lingering open sockets from crashing the binder
+            try:
+                await asyncio.wait_for(reader.read(1024), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass
+                
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: 26\r\n"
+                "Connection: close\r\n\r\n"
+                "Telegram Bot is active! 🚀"
+            )
             writer.write(response.encode("utf-8"))
             await writer.drain()
-            writer.close()
-            await writer.wait_closed()
         except Exception:
             pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
             
     try:
         server = await asyncio.start_server(handle_client, "0.0.0.0", port)
