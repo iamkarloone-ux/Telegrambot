@@ -6,12 +6,12 @@ import json
 import base64
 import gzip
 import orjson
+import asyncio
 import database as db  # Imports your existing root database.py
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from telegram_bot.config import BASE_AUTH, BASE_SYNC, CAR_LIST_URL, CAR_IMAGES_URL
 from telegram_bot.keyboards import get_patch_menu_keyboard
-from telegram_bot.states import ResellerStates
 
 # --- SYSTEM UTILITIES ---
 
@@ -108,6 +108,22 @@ async def load_db_data_async() -> tuple:
         print(f"Error loading car db: {e}")
         return {}, {}
 
+# --- LOCAL BACKGROUND CLEANUP HELPERS ---
+
+async def track_msg_local(state: FSMContext, message_id: int):
+    data = await state.get_data()
+    msg_list = data.get("msgs_to_delete", [])
+    if message_id not in msg_list:
+        msg_list.append(message_id)
+    await state.update_data(msgs_to_delete=msg_list)
+
+async def auto_delete_after_delay(msg: Message, delay: int = 15):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
 # --- BACKGROUND PATCH EXECUTION ENGINE ---
 
 async def execute_reseller_patch_task(
@@ -118,7 +134,7 @@ async def execute_reseller_patch_task(
         data = await state.get_data()
         email = data['target_email']
         password = data['target_pass']
-        tier = data.get("license_tier", "premium") # Retrieves active key tier
+        tier = data.get("license_tier", "premium")
         dev_id = uuid.uuid4().hex
         
         async with httpx.AsyncClient(http2=True, timeout=60.0) as client:
@@ -130,25 +146,21 @@ async def execute_reseller_patch_task(
             
             summary_actions = []
             
-            # 1. Structure Validation & Repair (Prevents crashes on raw 0-balance accounts)
             res = profile.setdefault("resources", {})
             if not isinstance(res, dict) or res is None:
                 res = {}
                 profile["resources"] = res
 
-            # Repair soft (Silver)
             if "soft" not in res or not isinstance(res["soft"], dict) or res["soft"] is None:
                 res["soft"] = {"amount": 0.0}
             elif "amount" not in res["soft"] or res["soft"]["amount"] is None:
                 res["soft"]["amount"] = 0.0
 
-            # Repair hard (Gold)
             if "hard" not in res or not isinstance(res["hard"], dict) or res["hard"] is None:
                 res["hard"] = {"amount": 0}
             elif "amount" not in res["hard"] or res["hard"]["amount"] is None:
                 res["hard"]["amount"] = 0
 
-            # Repair experience (XP)
             if "experience" not in res or not isinstance(res["experience"], dict) or res["experience"] is None:
                 res["experience"] = {"amount": 0}
             elif "amount" not in res["experience"] or res["experience"]["amount"] is None:
@@ -156,21 +168,18 @@ async def execute_reseller_patch_task(
             
             current_xp = int(res["experience"]["amount"])
             
-            # --- Modification: Ban Safe Pack 1 (10M Silver + 6k Gold) ---
             if action == 'safe_1':
                 res["soft"]["amount"] = float(res["soft"]["amount"]) + 10000000.0
                 res["hard"]["amount"] = int(res["hard"]["amount"]) + 6000
                 profile["resources"] = res
                 summary_actions.append("💰 Applied Ban-Safe Pack 1 (+10M Silver, +6k Gold)")
 
-            # --- Modification: Ban Safe Pack 2 (6M Silver + 1k Gold) ---
             elif action == 'safe_2':
                 res["soft"]["amount"] = float(res["soft"]["amount"]) + 6000000.0
                 res["hard"]["amount"] = int(res["hard"]["amount"]) + 1000
                 profile["resources"] = res
                 summary_actions.append("💰 Applied Ban-Safe Pack 2 (+6M Silver, +1k Gold)")
 
-            # --- Modification: Custom Input Values ---
             elif action == 'custom':
                 if custom_silver:
                     res["soft"]["amount"] = float(res["soft"]["amount"]) + float(custom_silver)
@@ -181,7 +190,6 @@ async def execute_reseller_patch_task(
                 profile["resources"] = res
                 summary_actions.append(f"💰 Custom Resources added: +{custom_silver:,.0f} Silver, +{custom_gold:,} Gold, +{custom_xp:,} XP")
 
-            # --- Modification: Max Nitro (All cars) ---
             elif action in ['nitro', 'nitro_all']:
                 owned_cars = [k for k in garage.keys() if k.isdigit() and isinstance(garage[k], dict)]
                 if owned_cars:
@@ -194,7 +202,6 @@ async def execute_reseller_patch_task(
                         nitro["amount"] = 20000000
                     summary_actions.append(f"⚡ Maxed Nitro on {len(owned_cars)} car(s)")
 
-            # --- Modification: Max Nitro (Single selective car) ---
             elif action == 'nitro_single':
                 if target_car_id in garage:
                     current_timestamp = int(time.time())
@@ -206,7 +213,6 @@ async def execute_reseller_patch_task(
                     car_name = garage[target_car_id].get("__desc_id", f"Car {target_car_id}")
                     summary_actions.append(f"⚡ Maxed Nitro on specific Car: {car_name}")
 
-            # --- Modification: Map Region Unlocker ---
             elif action == 'maps':
                 world_parts = profile.setdefault("game_world_parts", {})
                 quests = profile.setdefault("quests", {})
@@ -225,7 +231,6 @@ async def execute_reseller_patch_task(
                     quest_node["rewarded"] = True
                 summary_actions.append("🗺️ Unlocked all map regions and bypassed quests")
 
-            # --- Modification: Inject Custom Car ---
             elif action == 'inject_car':
                 car_db, _ = await load_db_data_async()
                 existing_keys = sorted([int(k) for k in garage.keys() if k.isdigit()])
@@ -236,10 +241,8 @@ async def execute_reseller_patch_task(
                 garage[str(last_id)] = car_db[target_car_id]
                 
                 car_name = car_db[target_car_id].get("__desc_id", f"Car {target_car_id}")
-                # Clean, customer-facing delivery text (removed raw database IDs entirely)
                 summary_actions.append(f"🚗 Injected untouched {car_name} into your garage")
 
-            # Encryption and Upload
             current_time = int(time.time())
             profile["lastSyncTime"] = current_time
             cont["compressed_data"] = encrypt_payload_strict_local(profile)
@@ -248,27 +251,41 @@ async def execute_reseller_patch_task(
             if r_up.status_code != 200:
                 raise Exception(f"Upload rejected by CarX: {r_up.text}")
                 
+            try:
+                await event_message.delete()
+            except Exception:
+                pass
+                
             success_msg = (
                 "🎉 *PATCHING COMPLETED SUCCESSFULLY!* 🎉\n\n"
                 f"📧 Account: `{email}`\n"
                 "Applied modifications:\n" + "\n".join([f"- {act}" for act in summary_actions]) + "\n\n"
                 "Please restart your game completely to view changes! Enjoy! 🔥"
             )
-            await event_message.answer(success_msg, parse_mode="Markdown")
+            sent_success = await event_message.answer(success_msg, parse_mode="Markdown")
+            asyncio.create_task(auto_delete_after_delay(sent_success, 15))
             
-            # Loopback: Send action menu again automatically with correct tier lock views
-            await event_message.answer(
+            sent_menu = await event_message.answer(
                 "⚙️ *Select Patch Action* ⚙️",
                 reply_markup=get_patch_menu_keyboard(tier=tier),
                 parse_mode="Markdown"
             )
+            await track_msg_local(state, sent_menu.message_id)
             await state.set_state(ResellerStates.awaiting_patch_choice)
             
     except Exception as e:
-        await event_message.answer(f"😔 *Patcher Task Failed.*\n\nError details: {e}", parse_mode="Markdown")
-        await event_message.answer(
+        try:
+            await event_message.delete()
+        except Exception:
+            pass
+            
+        sent_err = await event_message.answer(f"😔 *Patcher Task Failed.*\n\nError details: {e}", parse_mode="Markdown")
+        asyncio.create_task(auto_delete_after_delay(sent_err, 15))
+        
+        sent_menu = await event_message.answer(
             "⚙️ *Select Patch Action* ⚙️",
             reply_markup=get_patch_menu_keyboard(tier=tier),
             parse_mode="Markdown"
         )
+        await track_msg_local(state, sent_menu.message_id)
         await state.set_state(ResellerStates.awaiting_patch_choice)
