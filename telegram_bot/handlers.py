@@ -23,11 +23,41 @@ from telegram_bot.patcher import (
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
+# --- DISAPPEARING CONVERSATION HELPERS ---
+
+async def track_msg(state: FSMContext, message_id: int):
+    """Stores a message ID in the current state dataset for cleanup."""
+    data = await state.get_data()
+    msg_list = data.get("msgs_to_delete", [])
+    if message_id not in msg_list:
+        msg_list.append(message_id)
+    await state.update_data(msgs_to_delete=msg_list)
+
+async def purge_tracked_msgs(chat_id: int, state: FSMContext):
+    """Deletes all messages currently tracked in the state."""
+    data = await state.get_data()
+    msg_list = data.get("msgs_to_delete", [])
+    for mid in msg_list:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    await state.update_data(msgs_to_delete=[])
+
+# --- COMMANDS ---
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Greets user and asks for reseller license key."""
+    """Greets user, cleans chat, and asks for reseller license key."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+        
+    await purge_tracked_msgs(message.chat.id, state)
     await state.clear()
-    await message.answer(
+    
+    sent_msg = await message.answer(
         "🔑 *Reseller Patcher Tool* 🔑\n\n"
         "To access this tool, please enter your active Reseller License Key.\n\n"
         "Don't have a key? Message the developer to purchase access:\n"
@@ -36,71 +66,97 @@ async def cmd_start(message: Message, state: FSMContext):
         parse_mode="Markdown"
     )
     await state.set_state(ResellerStates.awaiting_key)
+    await track_msg(state, sent_msg.message_id)
 
 @dp.message(ResellerStates.awaiting_key)
 async def process_key(message: Message, state: FSMContext):
+    try:
+        await message.delete() # Disappear input credentials
+    except Exception:
+        pass
+        
     key = message.text.strip()
     license_info = await verify_license_key(key, str(message.from_user.id))
     
     if not license_info:
-        await message.answer(
+        await purge_tracked_msgs(message.chat.id, state)
+        sent_msg = await message.answer(
             "❌ *Invalid or Expired License Key.*\n\n"
             "To buy a subscription (10$/Month), contact:\n"
             "💬 m.me/lark.abalunan.1",
             parse_mode="Markdown"
         )
+        await track_msg(state, sent_msg.message_id)
         return
         
     if license_info.get("bound") is False:
-        await message.answer(
+        await purge_tracked_msgs(message.chat.id, state)
+        sent_msg = await message.answer(
             "❌ *License Binding Blocked.*\n\n"
             "This key is already locked/bound to another Telegram user. Keys are restricted to 1 account only.",
             parse_mode="Markdown"
         )
+        await track_msg(state, sent_msg.message_id)
         return
 
     tier_level = license_info.get("tier", "premium")
     tier_display = "⭐ PREMIUM" if tier_level == "premium" else "🆕 FREE"
     
     await state.update_data(license_key=key, license_tier=tier_level)
-    await message.answer(f"✅ License verified successfully! ({tier_display})\n\n📧 Enter target CarX Street account Email:")
+    await purge_tracked_msgs(message.chat.id, state)
+    
+    sent_msg = await message.answer(f"✅ License verified successfully! ({tier_display})\n\n📧 Enter target CarX Street account Email:")
+    await track_msg(state, sent_msg.message_id)
     await state.set_state(ResellerStates.awaiting_email)
 
 @dp.message(ResellerStates.awaiting_email)
 async def process_email(message: Message, state: FSMContext):
+    try:
+        await message.delete() # Disappear email input
+    except Exception:
+        pass
+        
     email = message.text.strip()
     if "@" not in email or "." not in email:
-        await message.answer("❌ Invalid email format. Try again:")
+        sent_err = await message.answer("❌ Invalid email format. Try again:")
+        await track_msg(state, sent_err.message_id)
         return
         
     await state.update_data(target_email=email)
-    await message.answer("🔐 Enter target account Password:")
+    await purge_tracked_msgs(message.chat.id, state)
+    
+    sent_msg = await message.answer("🔐 Enter target account Password:")
+    await track_msg(state, sent_msg.message_id)
     await state.set_state(ResellerStates.awaiting_password)
 
 @dp.message(ResellerStates.awaiting_password)
 async def process_password(message: Message, state: FSMContext):
+    try:
+        await message.delete() # Disappear password input
+    except Exception:
+        pass
+        
     password = message.text.strip()
     await state.update_data(target_pass=password)
     
     data = await state.get_data()
     tier = data.get("license_tier", "premium")
+    await purge_tracked_msgs(message.chat.id, state)
     
-    await message.answer(
+    sent_msg = await message.answer(
         "⚙️ *Select Patch Action* ⚙️\n\n"
         "Select an option below, or manually type your selection number.",
         reply_markup=get_patch_menu_keyboard(tier=tier),
         parse_mode="Markdown"
     )
+    await track_msg(state, sent_msg.message_id)
     await state.set_state(ResellerStates.awaiting_patch_choice)
 
 
-# --- 🛑 SPECIFIC SUB-HANDLERS (DEFINED FIRST FOR ROUTING PRIORITY) 🛑 ---
-
-# --- PREMIUM LOCKED ACTION HANDLER ---
+# --- SPECIFIC SUB-HANDLERS ---
 
 @dp.callback_query(F.data == "premium_locked", ResellerStates.awaiting_patch_choice)
 async def process_premium_locked(callback: CallbackQuery, state: FSMContext):
-    """Edits the menu message to show the lock notice with a back button."""
     await callback.answer("🔒 Feature Locked!", show_alert=True)
     
     kb_back = InlineKeyboardMarkup(
@@ -118,14 +174,13 @@ async def process_premium_locked(callback: CallbackQuery, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# --- PAGINATED INJECT CATALOG ROUTING ---
-
 async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext):
     await state.update_data(last_catalog_page=page)
     
     car_db, car_maps = await load_db_data_async()
     if not car_db:
-        await msg_obj.answer("❌ Failed to download vehicle database. Try again later.")
+        sent_msg = await msg_obj.answer("❌ Failed to download vehicle database. Try again later.")
+        await track_msg(state, sent_msg.message_id)
         return
 
     car_ids = list(car_db.keys())
@@ -149,7 +204,6 @@ async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext)
         out += f"• *{name}* (Price: Reseller Free)\n"
         keyboard_buttons.append([InlineKeyboardButton(text=f"⚡ Inject {name}", callback_data=f"inject_car_id_{car_id}")])
 
-    # Add Navigation row
     nav_row = []
     if page > 1:
         nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"catalog_page_{page - 1}"))
@@ -160,17 +214,16 @@ async def send_paginated_catalog(msg_obj: Message, page: int, state: FSMContext)
     keyboard_buttons.append([InlineKeyboardButton(text="⬅️ Return to Action Menu", callback_data="back_to_menu")])
 
     kb_paginated = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-    await msg_obj.answer(out, reply_markup=kb_paginated, parse_mode="Markdown")
+    
+    await purge_tracked_msgs(msg_obj.chat.id, state)
+    sent_msg = await msg_obj.answer(out, reply_markup=kb_paginated, parse_mode="Markdown")
+    await track_msg(state, sent_msg.message_id)
 
 @dp.callback_query(F.data.startswith("catalog_page_"), ResellerStates.awaiting_patch_choice)
 async def process_catalog_page_navigation(callback: CallbackQuery, state: FSMContext):
     page_num = int(callback.data.replace("catalog_page_", ""))
     await callback.answer()
-    
-    await callback.message.delete()
     await send_paginated_catalog(callback.message, page=page_num, state=state)
-
-# --- INLINE PREVIEW CAR INJECTION HANDLERS (ON-DEMAND PREVIEWS) ---
 
 @dp.callback_query(F.data.startswith("inject_car_id_"), ResellerStates.awaiting_patch_choice)
 async def process_inline_car_injection(callback: CallbackQuery, state: FSMContext):
@@ -197,36 +250,37 @@ async def process_inline_car_injection(callback: CallbackQuery, state: FSMContex
         ]
     )
     
-    await callback.message.delete()
+    await purge_tracked_msgs(callback.message.chat.id, state)
+    
     try:
         if img_url and img_url != "N/A":
-            await callback.message.answer_photo(photo=img_url, caption=info, reply_markup=kb_confirm, parse_mode="Markdown")
+            sent_msg = await callback.message.answer_photo(photo=img_url, caption=info, reply_markup=kb_confirm, parse_mode="Markdown")
         else:
-            await callback.message.answer(info, reply_markup=kb_confirm, parse_mode="Markdown")
+            sent_msg = await callback.message.answer(info, reply_markup=kb_confirm, parse_mode="Markdown")
     except Exception:
-        await callback.message.answer(info, reply_markup=kb_confirm, parse_mode="Markdown")
+        sent_msg = await callback.message.answer(info, reply_markup=kb_confirm, parse_mode="Markdown")
+        
+    await track_msg(state, sent_msg.message_id)
 
 @dp.callback_query(F.data == "back_to_catalog", ResellerStates.awaiting_patch_choice)
 async def process_back_to_catalog(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
     saved_page = data.get("last_catalog_page", 1)
-    
     await send_paginated_catalog(callback.message, page=saved_page, state=state)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
 
 @dp.callback_query(F.data.startswith("confirm_inject_"), ResellerStates.awaiting_patch_choice)
 async def process_confirmed_car_injection(callback: CallbackQuery, state: FSMContext):
     car_id = callback.data.replace("confirm_inject_", "")
     await callback.answer()
     
-    await callback.message.answer(f"⏳ Patcher running... Injecting vehicle.")
+    await purge_tracked_msgs(callback.message.chat.id, state)
+    sent_msg = await callback.message.answer(f"⏳ Patcher running... Injecting vehicle.")
+    await track_msg(state, sent_msg.message_id)
+    
     asyncio.create_task(
         execute_reseller_patch_task(
-            callback.message, state, 'inject_car', target_car_id=car_id
+            sent_msg, state, 'inject_car', target_car_id=car_id
         )
     )
 
@@ -235,86 +289,128 @@ async def process_confirmed_car_injection(callback: CallbackQuery, state: FSMCon
 @dp.message(ResellerStates.awaiting_custom_silver)
 @dp.callback_query(F.data == "skip_step", ResellerStates.awaiting_custom_silver)
 async def process_silver(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else "skip"
-    silver = 0.0 if choice == "skip" else float(choice.replace(",", ""))
-    
-    await state.update_data(silver_val=silver)
-    msg = "✨ Enter the amount of Gold to add:\n\n👉 Type 'skip' or press below to skip."
-    
+    chat_id = event.chat.id if isinstance(event, Message) else event.message.chat.id
     if isinstance(event, Message):
-        await event.answer(msg, reply_markup=get_skip_keyboard())
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        choice = event.text.strip().lower()
     else:
         await event.answer()
-        await event.message.edit_text(msg, reply_markup=get_skip_keyboard())
+        choice = "skip"
         
+    silver = 0.0 if choice == "skip" else float(choice.replace(",", ""))
+    await state.update_data(silver_val=silver)
+    await purge_tracked_msgs(chat_id, state)
+    
+    msg = "✨ Enter the amount of Gold to add:\n\n👉 Type 'skip' or press below to skip."
+    msg_obj = event if isinstance(event, Message) else event.message
+    sent_msg = await msg_obj.answer(msg, reply_markup=get_skip_keyboard())
+    await track_msg(state, sent_msg.message_id)
     await state.set_state(ResellerStates.awaiting_custom_gold)
 
 @dp.message(ResellerStates.awaiting_custom_gold)
 @dp.callback_query(F.data == "skip_step", ResellerStates.awaiting_custom_gold)
 async def process_gold(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else "skip"
-    gold = 0 if choice == "skip" else int(choice.replace(",", ""))
-    
-    await state.update_data(gold_val=gold)
-    msg = "📈 Enter the amount of XP to add:\n\n👉 Type 'skip' or press below to skip."
-    
+    chat_id = event.chat.id if isinstance(event, Message) else event.message.chat.id
     if isinstance(event, Message):
-        await event.answer(msg, reply_markup=get_skip_keyboard())
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        choice = event.text.strip().lower()
     else:
         await event.answer()
-        await event.message.edit_text(msg, reply_markup=get_skip_keyboard())
+        choice = "skip"
         
+    gold = 0 if choice == "skip" else int(choice.replace(",", ""))
+    await state.update_data(gold_val=gold)
+    await purge_tracked_msgs(chat_id, state)
+    
+    msg = "📈 Enter the amount of XP to add:\n\n👉 Type 'skip' or press below to skip."
+    msg_obj = event if isinstance(event, Message) else event.message
+    sent_msg = await msg_obj.answer(msg, reply_markup=get_skip_keyboard())
+    await track_msg(state, sent_msg.message_id)
     await state.set_state(ResellerStates.awaiting_custom_xp)
 
 @dp.message(ResellerStates.awaiting_custom_xp)
 @dp.callback_query(F.data == "skip_step", ResellerStates.awaiting_custom_xp)
 async def process_xp(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else "skip"
+    chat_id = event.chat.id if isinstance(event, Message) else event.message.chat.id
+    if isinstance(event, Message):
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        choice = event.text.strip().lower()
+    else:
+        await event.answer()
+        choice = "skip"
+        
     xp = 0 if choice == "skip" else int(choice.replace(",", ""))
     
     data = await state.get_data()
     tier = data.get("license_tier", "premium")
     msg_obj = event if isinstance(event, Message) else event.message
-    if not isinstance(event, Message):
-        await event.answer()
+    await purge_tracked_msgs(chat_id, state)
 
     # Cancel if all skipped
     if data.get('silver_val', 0.0) == 0.0 and data.get('gold_val', 0) == 0 and xp == 0:
-        await msg_obj.answer("⚠️ All fields skipped. Patch cancelled.")
-        await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
+        sent_warn = await msg_obj.answer("⚠️ All fields skipped. Patch cancelled.")
+        await asyncio.sleep(2)
+        try:
+            await sent_warn.delete()
+        except Exception:
+            pass
+            
+        sent_msg = await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
+        await track_msg(state, sent_msg.message_id)
         await state.set_state(ResellerStates.awaiting_patch_choice)
         return
 
-    await msg_obj.answer("⏳ Patcher queueing with custom values... Execution in progress.")
+    sent_msg = await msg_obj.answer("⏳ Patcher queueing with custom values... Execution in progress.")
+    await track_msg(state, sent_msg.message_id)
+    
     asyncio.create_task(
         execute_reseller_patch_task(
-            msg_obj, state, 'custom',
+            sent_msg, state, 'custom',
             custom_silver=data['silver_val'],
             custom_gold=data['gold_val'],
             custom_xp=xp
         )
     )
 
-# --- NITRO MANAGEMENT SUB-MENU & OPTIONS ---
+# --- NITRO MANAGEMENT SUB-MENU ---
 
 @dp.message(ResellerStates.awaiting_single_nitro_car_id)
 @dp.callback_query(F.data.startswith("nitro_"), ResellerStates.awaiting_patch_choice)
 async def process_nitro_options(event, state: FSMContext):
-    choice = event.text.strip().lower() if isinstance(event, Message) else event.data
-    msg_obj = event if isinstance(event, Message) else event.message
-    
-    if not isinstance(event, Message):
+    chat_id = event.chat.id if isinstance(event, Message) else event.message.chat.id
+    if isinstance(event, Message):
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        choice = event.text.strip().lower()
+    else:
         await event.answer()
+        choice = event.data
         
+    msg_obj = event if isinstance(event, Message) else event.message
     data = await state.get_data()
     tier = data.get("license_tier", "premium")
     
     if choice in ["nitro_all", "all", "1"]:
-        await msg_obj.answer("⏳ Patcher queueing Max Nitro... Execution in progress.")
-        asyncio.create_task(execute_reseller_patch_task(msg_obj, state, 'nitro_all'))
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer("⏳ Patcher queueing Max Nitro... Execution in progress.")
+        await track_msg(state, sent_msg.message_id)
+        asyncio.create_task(execute_reseller_patch_task(sent_msg, state, 'nitro_all'))
         
     elif choice in ["nitro_single", "single", "2"]:
-        await msg_obj.answer("⏳ Loading garage profile...")
+        await purge_tracked_msgs(chat_id, state)
+        sent_loading = await msg_obj.answer("⏳ Loading garage profile...")
+        await track_msg(state, sent_loading.message_id)
         
         try:
             dev_id = uuid.uuid4().hex
@@ -325,9 +421,17 @@ async def process_nitro_options(event, state: FSMContext):
                 garage = profile["cars"]["items"] if ("cars" in profile and "items" in profile["cars"]) else profile
                 owned_cars = [k for k in garage.keys() if k.isdigit() and isinstance(garage[k], dict)]
                 
+                await purge_tracked_msgs(chat_id, state)
+                
                 if not owned_cars:
-                    await msg_obj.answer("❌ No cars found in this account.")
-                    await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
+                    sent_err = await msg_obj.answer("❌ No cars found in this account.")
+                    await asyncio.sleep(3)
+                    try:
+                        await sent_err.delete()
+                    except Exception:
+                        pass
+                    sent_msg = await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
+                    await track_msg(state, sent_msg.message_id)
                     await state.set_state(ResellerStates.awaiting_patch_choice)
                     return
                 
@@ -336,18 +440,28 @@ async def process_nitro_options(event, state: FSMContext):
                     desc_id = garage[c_id].get("__desc_id", "Unknown")
                     out += f"- ID: `{c_id}` : {desc_id}\n"
                 out += "\n👉 Please enter the exact Car ID from the list to apply Max Nitro to:\n\n👉 Type /start to cancel."
-                await msg_obj.answer(out, parse_mode="Markdown")
+                
+                sent_msg = await msg_obj.answer(out, parse_mode="Markdown")
+                await track_msg(state, sent_msg.message_id)
                 await state.set_state(ResellerStates.awaiting_single_nitro_car_id)
                 
         except Exception as e:
-            await msg_obj.answer(f"❌ Failed to load garage: {e}")
-            await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
+            await purge_tracked_msgs(chat_id, state)
+            sent_err = await msg_obj.answer(f"❌ Failed to load garage: {e}")
+            await asyncio.sleep(3)
+            try:
+                await sent_err.delete()
+            except Exception:
+                pass
+            sent_msg = await msg_obj.answer("⚙️ *Select Patch Action* ⚙️", reply_markup=get_patch_menu_keyboard(tier=tier), parse_mode="Markdown")
+            await track_msg(state, sent_msg.message_id)
             await state.set_state(ResellerStates.awaiting_patch_choice)
     else:
-        # Received single Car ID text
         car_id = choice
-        await msg_obj.answer(f"⏳ Patcher running... Applying Max Nitro to Car ID {car_id}.")
-        asyncio.create_task(execute_reseller_patch_task(msg_obj, state, 'nitro_single', target_car_id=car_id))
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer(f"⏳ Patcher running... Applying Max Nitro to Car ID {car_id}.")
+        await track_msg(state, sent_msg.message_id)
+        asyncio.create_task(execute_reseller_patch_task(sent_msg, state, 'nitro_single', target_car_id=car_id))
 
 @dp.callback_query(F.data == "back_to_menu", ResellerStates.awaiting_patch_choice)
 async def process_back_btn(callback: CallbackQuery, state: FSMContext):
@@ -359,17 +473,24 @@ async def process_back_btn(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_patch_menu_keyboard(tier=tier),
         parse_mode="Markdown"
     )
-    await state.set_state(ResellerStates.awaiting_patch_choice)
 
-# --- 🚨 CATCH-ALL ACTION MENU ROUTER (DEFINED LAST FOR ROUTING PRIORITY) 🚨 ---
+# --- ACTION MENU ROUTER ---
 
 @dp.message(ResellerStates.awaiting_patch_choice)
 @dp.callback_query(ResellerStates.awaiting_patch_choice)
 async def process_patch_selection(event, state: FSMContext):
-    choice = event.text.strip() if isinstance(event, Message) else event.data
+    chat_id = event.chat.id if isinstance(event, Message) else event.message.chat.id
+    if isinstance(event, Message):
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        choice = event.text.strip()
+    else:
+        choice = event.data
+        
     msg_obj = event if isinstance(event, Message) else event.message
     
-    # Bypass callback routing collisions (forces pagination/inline-injects to bypass the menu)
     if isinstance(event, CallbackQuery) and (
         choice.startswith("inject_car_id_") or 
         choice.startswith("catalog_page_") or 
@@ -399,10 +520,11 @@ async def process_patch_selection(event, state: FSMContext):
     tier = data.get("license_tier", "premium")
 
     if not action:
-        await msg_obj.answer("❌ Invalid selection. Please select from the menu.", reply_markup=get_patch_menu_keyboard(tier=tier))
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer("❌ Invalid selection. Please select from the menu.", reply_markup=get_patch_menu_keyboard(tier=tier))
+        await track_msg(state, sent_msg.message_id)
         return
 
-    # Security Guard: Block Free accounts trying to run Premium Actions
     premium_actions = ['safe_1', 'custom', 'nitro_menu', 'maps', 'inject_car']
     if action in premium_actions and tier == "free":
         kb_back = InlineKeyboardMarkup(
@@ -410,7 +532,8 @@ async def process_patch_selection(event, state: FSMContext):
                 [InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_menu")]
             ]
         )
-        await msg_obj.answer(
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer(
             "🔒 *Premium Feature Locked.*\n\n"
             "This action is restricted to accounts with a *Premium License Key*.\n"
             "Your current key is registered on the Free tier.\n\n"
@@ -419,23 +542,29 @@ async def process_patch_selection(event, state: FSMContext):
             reply_markup=kb_back,
             parse_mode="Markdown"
         )
+        await track_msg(state, sent_msg.message_id)
         return
 
     if action == "cancel_session":
+        await purge_tracked_msgs(chat_id, state)
         await state.clear()
         await msg_obj.answer("🚪 Session ended. Type /start to login again.")
         return
         
     elif action == "switch_account":
-        await msg_obj.answer("📧 Enter the target CarX Street account Email:")
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer("📧 Enter the target CarX Street account Email:")
+        await track_msg(state, sent_msg.message_id)
         await state.set_state(ResellerStates.awaiting_email)
         return
 
     elif action == "custom":
-        await msg_obj.answer(
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer(
             "💰 Enter the amount of Silver to add:\n\n👉 Type 'skip' or press the button below to skip.",
             reply_markup=get_skip_keyboard()
         )
+        await track_msg(state, sent_msg.message_id)
         await state.set_state(ResellerStates.awaiting_custom_silver)
         return
 
@@ -447,24 +576,27 @@ async def process_patch_selection(event, state: FSMContext):
                 [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_menu")]
             ]
         )
-        await msg_obj.answer(
+        await purge_tracked_msgs(chat_id, state)
+        sent_msg = await msg_obj.answer(
             "Do you want to apply Max Nitro to ALL cars or a single car?\n\n"
             "👉 Type *1* for Max All Cars\n"
             "👉 Type *2* to Select a Single Car", 
             reply_markup=kb,
             parse_mode="Markdown"
         )
+        await track_msg(state, sent_msg.message_id)
         return
 
     elif action == "inject_car":
-        # Load vehicles and display the interactive Paginated Menu (Page 1)
         await send_paginated_catalog(msg_obj, page=1, state=state)
         return
 
-    # Trigger operations (safe_2, or safe_1/maps if on Premium Key)
-    await msg_obj.answer("⏳ Patcher queueing... Execution in progress.")
+    await purge_tracked_msgs(chat_id, state)
+    sent_msg = await msg_obj.answer("⏳ Patcher queueing... Execution in progress.")
+    await track_msg(state, sent_msg.message_id)
+    
     asyncio.create_task(
         execute_reseller_patch_task(
-            msg_obj, state, action
+            sent_msg, state, action
         )
     )
