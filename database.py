@@ -14,7 +14,10 @@ async def init_db():
     pool = await asyncpg.create_pool(
         dsn=DATABASE_URL, 
         ssl="require",
-        statement_cache_size=0 # Disables statement caching for PgBouncer compatibility
+        statement_cache_size=0, # Disables statement caching for PgBouncer compatibility
+        max_inactive_connection_lifetime=180.0, # Discards and recycles idle connections to avoid timeout dropouts
+        min_size=1,
+        max_size=10
     )
     
     async with pool.acquire() as conn:
