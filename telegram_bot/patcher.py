@@ -12,6 +12,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from telegram_bot.config import BASE_AUTH, BASE_SYNC, CAR_LIST_URL, CAR_IMAGES_URL
 from telegram_bot.keyboards import get_patch_menu_keyboard
+from telegram_bot.states import ResellerStates # Added missing import
 
 # --- SYSTEM UTILITIES ---
 
